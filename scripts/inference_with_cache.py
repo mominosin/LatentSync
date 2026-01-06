@@ -160,6 +160,9 @@ class CachedLipsyncPipeline(LipsyncPipeline):
             boxes = list(cached_boxes)[: len(whisper_chunks)]
             affine_matrices = list(cached_affine_matrices)[: len(whisper_chunks)]
 
+        # Ensure affine_matrices are on GPU for restore_video
+        affine_matrices = [m.to("cuda") if isinstance(m, torch.Tensor) else m for m in affine_matrices]
+
         return video_frames, faces, boxes, affine_matrices
 
     @torch.no_grad()
