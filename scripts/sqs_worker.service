@@ -1,0 +1,42 @@
+# systemd service file for LatentSync SQS Worker
+#
+# Installation:
+#   sudo cp scripts/sqs_worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable latentsync-worker
+#   sudo systemctl start latentsync-worker
+#
+# Logs:
+#   sudo journalctl -u latentsync-worker -f
+
+[Unit]
+Description=LatentSync SQS Worker
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/LatentSync
+Environment="PATH=/home/ubuntu/LatentSync/.venv/bin:/usr/local/bin:/usr/bin"
+Environment="CUDA_VISIBLE_DEVICES=0"
+
+# Configure these environment variables or use a config file
+Environment="SQS_QUEUE_URL=https://sqs.ap-northeast-1.amazonaws.com/123456789/latentsync-jobs"
+Environment="AWS_DEFAULT_REGION=ap-northeast-1"
+
+ExecStart=/home/ubuntu/LatentSync/.venv/bin/python scripts/sqs_worker.py \
+    --queue-url ${SQS_QUEUE_URL} \
+    --work-dir /tmp/latentsync \
+    --checkpoint checkpoints/latentsync_unet.pt \
+    --visibility-timeout 3600
+
+Restart=always
+RestartSec=10
+
+# Resource limits
+MemoryMax=28G
+CPUQuota=90%
+
+[Install]
+WantedBy=multi-user.target

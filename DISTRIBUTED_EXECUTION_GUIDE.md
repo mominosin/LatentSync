@@ -434,6 +434,177 @@ python scripts/inference_with_cache.py \
 
 ---
 
+## SQS分散実行の詳細
+
+### ファイル構成
+
+```
+scripts/
+├── sqs_job_producer.py    # ジョブ投入スクリプト
+├── sqs_worker.py          # ワーカースクリプト（各EC2で実行）
+└── sqs_worker.service     # systemdサービスファイル
+```
+
+### Step 1: S3バケット準備
+
+```bash
+# バケット作成
+aws s3 mb s3://my-latentsync-bucket
+
+# ディレクトリ構造
+s3://my-latentsync-bucket/
+├── input/
+│   ├── videos/      # 入力動画
+│   └── audios/      # 入力音声
+├── cache/
+│   └── video/       # 前処理キャッシュ
+└── output/          # 出力動画
+```
+
+### Step 2: SQSキュー作成
+
+```bash
+# FIFOキュー作成（順序保証・重複排除あり）
+aws sqs create-queue \
+    --queue-name latentsync-jobs.fifo \
+    --attributes '{
+        "FifoQueue": "true",
+        "ContentBasedDeduplication": "false",
+        "VisibilityTimeout": "3600",
+        "MessageRetentionPeriod": "86400"
+    }'
+```
+
+### Step 3: ジョブ投入
+
+```bash
+# 単一ジョブ投入
+python scripts/sqs_job_producer.py \
+    --queue-url https://sqs.ap-northeast-1.amazonaws.com/123456789/latentsync-jobs.fifo \
+    --video-s3 s3://my-latentsync-bucket/input/videos/video1.mp4 \
+    --audio-s3 s3://my-latentsync-bucket/input/audios/audio1.wav \
+    --output-s3 s3://my-latentsync-bucket/output/result1.mp4 \
+    --cache-s3-prefix s3://my-latentsync-bucket/cache/video
+```
+
+```bash
+# バッチ投入（JSONファイルから）
+cat > jobs.json << 'EOF'
+[
+  {
+    "video_s3": "s3://my-bucket/input/videos/video1.mp4",
+    "audio_s3": "s3://my-bucket/input/audios/audio1.wav",
+    "output_s3": "s3://my-bucket/output/result1.mp4"
+  },
+  {
+    "video_s3": "s3://my-bucket/input/videos/video1.mp4",
+    "audio_s3": "s3://my-bucket/input/audios/audio2.wav",
+    "output_s3": "s3://my-bucket/output/result2.mp4"
+  }
+]
+EOF
+
+python scripts/sqs_job_producer.py \
+    --queue-url https://sqs.ap-northeast-1.amazonaws.com/123456789/latentsync-jobs.fifo \
+    --batch-file jobs.json
+```
+
+### Step 4: EC2ワーカー起動
+
+```bash
+# 手動実行（デバッグ用）
+python scripts/sqs_worker.py \
+    --queue-url https://sqs.ap-northeast-1.amazonaws.com/123456789/latentsync-jobs.fifo \
+    --work-dir /tmp/latentsync \
+    --checkpoint checkpoints/latentsync_unet.pt \
+    --region ap-northeast-1
+```
+
+```bash
+# systemdサービスとして実行（本番推奨）
+# 1. サービスファイルをコピー
+sudo cp scripts/sqs_worker.service /etc/systemd/system/
+
+# 2. 環境変数を設定（/etc/systemd/system/latentsync-worker.service を編集）
+sudo vim /etc/systemd/system/latentsync-worker.service
+# Environment="SQS_QUEUE_URL=..." を実際の値に変更
+
+# 3. サービス起動
+sudo systemctl daemon-reload
+sudo systemctl enable latentsync-worker
+sudo systemctl start latentsync-worker
+
+# 4. ログ確認
+sudo journalctl -u latentsync-worker -f
+```
+
+### Step 5: Auto Scaling設定（オプション）
+
+```bash
+# キューの長さに応じてEC2を自動スケール
+aws autoscaling create-auto-scaling-group \
+    --auto-scaling-group-name latentsync-workers \
+    --launch-template LaunchTemplateId=lt-xxxxx \
+    --min-size 0 \
+    --max-size 10 \
+    --desired-capacity 1
+
+# CloudWatchアラームでスケーリング
+aws cloudwatch put-metric-alarm \
+    --alarm-name sqs-queue-depth \
+    --metric-name ApproximateNumberOfMessagesVisible \
+    --namespace AWS/SQS \
+    --dimensions Name=QueueName,Value=latentsync-jobs.fifo \
+    --comparison-operator GreaterThanThreshold \
+    --threshold 5 \
+    --evaluation-periods 2 \
+    --alarm-actions arn:aws:autoscaling:...:policy/scale-up
+```
+
+### ジョブの流れ
+
+```
+1. Producer が S3 に動画/音声をアップロード
+2. Producer が SQS にジョブメッセージを投入
+3. Worker が SQS からメッセージを取得（Long Polling）
+4. Worker が S3 から動画/音声をダウンロード
+5. Worker がキャッシュの有無を確認、あればダウンロード
+6. Worker が推論実行
+7. Worker が結果を S3 にアップロード
+8. Worker がキャッシュを S3 にアップロード（新規生成時）
+9. Worker が SQS メッセージを削除（成功時）
+```
+
+### IAMポリシー例
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes"
+            ],
+            "Resource": "arn:aws:sqs:ap-northeast-1:123456789:latentsync-jobs.fifo"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:HeadObject"
+            ],
+            "Resource": "arn:aws:s3:::my-latentsync-bucket/*"
+        }
+    ]
+}
+```
+
+---
+
 ## 参考リンク
 
 - [LatentSync GitHub](https://github.com/bytedance/LatentSync)
