@@ -451,7 +451,7 @@ def main(config, args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LatentSync inference with cache support")
-    parser.add_argument("--unet_config_path", type=str, default="configs/unet.yaml")
+    parser.add_argument("--unet_config_path", type=str, default="configs/unet/stage2_512.yaml")
     parser.add_argument("--inference_ckpt_path", type=str, required=True)
     parser.add_argument("--video_path", type=str, required=True)
     parser.add_argument("--audio_path", type=str, required=True)
